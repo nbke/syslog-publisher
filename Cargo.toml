@@ -9,4 +9,4 @@ clap = "4.5.39"
 dotenv = "0.15.0"
 redis = "0.31.0"
 syslog_loose = "0.21.0"
-tokio = "1.45.1"
+tokio = { version = "1.45.1", features = ["full"] }
