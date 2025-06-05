@@ -1,5 +1,6 @@
 use std::env;
 use std::net::SocketAddr;
+use std::collections::{HashMap, hash_map::Entry};
 
 use anyhow::{Context, Result};
 use chrono::Datelike;
@@ -9,7 +10,7 @@ use redis::{AsyncCommands, streams::StreamMaxlen};
 use tokio::net::UdpSocket;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
-use log::error;
+use log::{error, warn};
 use serde_json::json;
 
 fn resolve_year((_month, _date, _hour, _min, _sec): syslog_loose::IncompleteDate) -> i32 {
@@ -58,14 +59,20 @@ async fn syslog_worker<Tz: chrono::TimeZone>(mut rx: mpsc::Receiver::<(chrono::D
         if !parsed_msg.structured_data.is_empty() {
             let mut json_elements = Vec::with_capacity(parsed_msg.structured_data.len());
             for data_entry in parsed_msg.structured_data {
-                let mut json_params = Vec::with_capacity(data_entry.params.len());
+                let mut json_params = HashMap::with_capacity(data_entry.params.len());
                 for param in data_entry.params {
-                    json_params.push(json!({ param.0: param.1}));
+                    match json_params.entry(param.0) {
+                        Entry::Occupied(_) => {
+                            warn!("duplicate key in syslog structured data params: {}", param.0);
+                            continue;
+                        },
+                        Entry::Vacant(vacant_entry) => vacant_entry.insert(param.1),
+                    };
                 }
 
                 json_elements.push(json!({
                     "id": data_entry.id,
-                    "params": json_params,
+                    "params": json!(json_params),
                 }));
             }
 
