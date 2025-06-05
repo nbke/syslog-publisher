@@ -4,3 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.98"
+clap = "4.5.39"
+dotenv = "0.15.0"
+redis = "0.31.0"
+syslog_loose = "0.21.0"
+tokio = "1.45.1"
