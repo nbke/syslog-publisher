@@ -7,6 +7,6 @@ edition = "2024"
 anyhow = "1.0.98"
 clap = "4.5.39"
 dotenv = "0.15.0"
-redis = "0.31.0"
+redis = { version = "0.31.0", features = ["tokio-comp", "connection-manager"] }
 syslog_loose = "0.21.0"
 tokio = { version = "1.45.1", features = ["full"] }
