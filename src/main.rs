@@ -32,7 +32,7 @@ async fn syslog_worker(
     stream_key: String,
     maxlen: usize,
 ) {
-    let histogram_timeshift = metrics::histogram!("log_messages_timeshift_seconds");
+    let histogram_timeshift = metrics::histogram!("log_messages_timeshift_millis");
     let counter_redis_errors = metrics::counter!("log_messages_redis_errors");
     while let Some((recv_ts, input, addr)) = rx.recv().await {
         let utf8_input = String::from_utf8_lossy(&input);
@@ -66,7 +66,7 @@ async fn syslog_worker(
                 "ts".to_string(),
                 ts_utc.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
             ));
-            histogram_timeshift.record((recv_ts - ts_utc).as_seconds_f32());
+            histogram_timeshift.record((recv_ts - ts_utc).as_seconds_f64() * 1_000.0);
         }
         if let Some(hostname) = parsed_msg.hostname {
             items.push(("hostname".to_string(), hostname.to_string()));
@@ -150,16 +150,18 @@ async fn start_metrics_server(metrics_addr: String, metrics_recorder: Prometheus
 }
 
 fn setup_metrics_recorder() -> Result<PrometheusHandle> {
-    const EXPONENTIAL_SECONDS: &[f64] = &[
-        0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+    const TIME_BUCKETS: &[f64] = &[
+        0.0001, 0.001, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+        100.0, 1000.0, 5_000.0, 10_000.0, 100_000.0, 500_000.0, 1_000_000.0,
+        10_000_000.0, 100_000_000.0,
     ];
 
     const SIZE_BUCKETS: &[f64] = &[10.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 10_000.0];
 
     let builder = PrometheusBuilder::new()
         .set_buckets_for_metric(
-            Matcher::Full("log_messages_timeshift_seconds".to_string()),
-            EXPONENTIAL_SECONDS,
+            Matcher::Full("log_messages_timeshift_millis".to_string()),
+            TIME_BUCKETS,
         )?
         .set_buckets_for_metric(Matcher::Full("log_messages_size".to_string()), SIZE_BUCKETS)?;
     builder
@@ -180,8 +182,8 @@ fn describe_metrics() {
         "Amount of dropped messages due to Redis errors"
     );
     metrics::describe_histogram!(
-        "log_messages_timeshift_seconds",
-        Unit::Seconds,
+        "log_messages_timeshift_millis",
+        Unit::Milliseconds,
         "Offset between sending the syslog message and it being received by the syslog_publisher"
     );
     metrics::describe_histogram!(
