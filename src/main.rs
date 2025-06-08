@@ -136,13 +136,13 @@ async fn handler_404() -> impl IntoResponse {
     (StatusCode::NOT_FOUND, "404 error")
 }
 
-async fn start_metrics_server(metrics_recorder: PrometheusHandle) {
+async fn start_metrics_server(metrics_addr: String, metrics_recorder: PrometheusHandle) {
     let app = Router::new()
         .route("/", get(handler_index))
         .route("/metrics", get(move || ready(metrics_recorder.render())))
         .fallback(handler_404);
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:3001")
+    let listener = tokio::net::TcpListener::bind(metrics_addr)
         .await
         .unwrap();
     println!("Serving metrics on: {}", listener.local_addr().unwrap());
@@ -230,6 +230,11 @@ fn main() -> Result<()> {
                 .value_parser(value_parser!(u16))
                 .help("Port of Redis server"),
         )
+        .arg(
+            arg!(--metrics <VALUE>)
+                .default_value("127.0.0.1:3001")
+                .help("Address of metrics server"),
+        )
         .get_matches();
 
     let redis_username = match env::var("REDIS_USERNAME") {
@@ -260,6 +265,7 @@ fn main() -> Result<()> {
     };
     let maxlen = matches.get_one::<usize>("maxlen").unwrap();
     let stream_key = matches.get_one::<String>("key").unwrap().clone();
+    let metrics_addr = matches.get_one::<String>("metrics").unwrap().clone();
 
     let rt = Runtime::new()?;
     rt.block_on(async {
@@ -277,7 +283,7 @@ fn main() -> Result<()> {
         tokio::spawn(syslog_worker(rx, conn, stream_key, *maxlen));
 
         describe_metrics();
-        tokio::spawn(start_metrics_server(metrics_recorder));
+        tokio::spawn(start_metrics_server(metrics_addr, metrics_recorder));
 
         let mut buf = [0; 65536];
         let counter_total_messages = metrics::counter!("log_messages_total");
