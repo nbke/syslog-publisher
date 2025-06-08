@@ -23,6 +23,7 @@ fn resolve_year((_month, _date, _hour, _min, _sec): syslog_loose::IncompleteDate
 
 async fn syslog_worker(mut rx: mpsc::Receiver::<(chrono::DateTime<Utc>, Vec<u8>, SocketAddr)>, mut redis_client: redis::aio::MultiplexedConnection, stream_key: String, maxlen: usize) {
     let histogram_timeshift = metrics::histogram!("log_messages_timeshift_seconds");
+    let counter_redis_errors = metrics::counter!("log_messages_redis_errors");
     while let Some((recv_ts, input, addr)) = rx.recv().await {
         let utf8_input = String::from_utf8_lossy(&input);
         let parsed_msg = syslog_loose::parse_message_with_year(&utf8_input, resolve_year, syslog_loose::Variant::Either);
@@ -89,7 +90,10 @@ async fn syslog_worker(mut rx: mpsc::Receiver::<(chrono::DateTime<Utc>, Vec<u8>,
         let result= redis_client.xadd_maxlen(&stream_key, StreamMaxlen::Approx(maxlen), "*", &items).await;
         match result {
             Ok(()) => (),
-            Err(err) => error!("Could not send log message: {}", err),
+            Err(err) => {
+                counter_redis_errors.increment(1);
+                error!("Could not send log message: {}", err);
+            },
         }
     }
     unreachable!();
@@ -140,6 +144,7 @@ fn setup_metrics_recorder() -> Result<PrometheusHandle> {
 fn describe_metrics() {
     use metrics::Unit;
     metrics::describe_counter!("log_messages_total", Unit::Count, "Total amount of received syslog messages");
+    metrics::describe_counter!("log_messages_redis_errors", Unit::Count, "Amount of dropped messages due to Redis errors");
     metrics::describe_histogram!("log_messages_timeshift_seconds", Unit::Seconds,
         "Offset between sending the syslog message and it being received by the syslog_publisher");
     metrics::describe_histogram!("log_messages_size", Unit::Bytes, "Size of the received syslog message");
