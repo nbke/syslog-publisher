@@ -1,24 +1,28 @@
-use std::env;
-use std::net::SocketAddr;
 use std::collections::{HashMap, hash_map::Entry};
+use std::env;
+use std::future::ready;
+use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
-use chrono::Datelike;
+use axum::{http::StatusCode, response::{Html, IntoResponse}, routing::get, Router};
+use chrono::{Datelike, Utc};
 use clap::{arg, Command, value_parser};
 use dotenv::dotenv;
+use log::{error, warn};
+use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use redis::{AsyncCommands, streams::StreamMaxlen};
+use serde_json::json;
 use tokio::net::UdpSocket;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
-use log::{error, warn};
-use serde_json::json;
 
 fn resolve_year((_month, _date, _hour, _min, _sec): syslog_loose::IncompleteDate) -> i32 {
     let now = chrono::Utc::now();
     now.year()
 }
 
-async fn syslog_worker<Tz: chrono::TimeZone>(mut rx: mpsc::Receiver::<(chrono::DateTime<Tz>, Vec<u8>, SocketAddr)>, mut redis_client: redis::aio::MultiplexedConnection, stream_key: String, maxlen: usize) -> () {
+async fn syslog_worker(mut rx: mpsc::Receiver::<(chrono::DateTime<Utc>, Vec<u8>, SocketAddr)>, mut redis_client: redis::aio::MultiplexedConnection, stream_key: String, maxlen: usize) {
+    let histogram_timeshift = metrics::histogram!("log_messages_timeshift_seconds");
     while let Some((recv_ts, input, addr)) = rx.recv().await {
         let utf8_input = String::from_utf8_lossy(&input);
         let parsed_msg = syslog_loose::parse_message_with_year(&utf8_input, resolve_year, syslog_loose::Variant::Either);
@@ -39,7 +43,9 @@ async fn syslog_worker<Tz: chrono::TimeZone>(mut rx: mpsc::Receiver::<(chrono::D
             items.push(("severity".to_string(), severity.as_str().to_string()));
         }
         if let Some(ts) = parsed_msg.timestamp {
-            items.push(("ts".to_string(), ts.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)));
+            let ts_utc = ts.with_timezone(&chrono::Utc);
+            items.push(("ts".to_string(), ts_utc.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)));
+            histogram_timeshift.record((recv_ts - ts_utc).as_seconds_f32());
         }
         if let Some(hostname) = parsed_msg.hostname {
             items.push(("hostname".to_string(), hostname.to_string()));
@@ -89,9 +95,63 @@ async fn syslog_worker<Tz: chrono::TimeZone>(mut rx: mpsc::Receiver::<(chrono::D
     unreachable!();
 }
 
+async fn handler_index() -> Html<&'static str> {
+    Html("<h1>Metrics server for syslog publisher</h1>")
+}
+
+async fn handler_404() -> impl IntoResponse {
+    (StatusCode::NOT_FOUND, "404 error")
+}
+
+async fn start_metrics_server(metrics_recorder: PrometheusHandle) {
+    let app = Router::new()
+        .route("/", get(handler_index))
+        .route("/metrics", get(move || ready(metrics_recorder.render())))
+        .fallback(handler_404);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:3001")
+        .await
+        .unwrap();
+    println!("Serving metrics on: {}", listener.local_addr().unwrap());
+    axum::serve(listener, app).await.unwrap();
+}
+
+fn setup_metrics_recorder() -> Result<PrometheusHandle> {
+    const EXPONENTIAL_SECONDS: &[f64] = &[
+        0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+    ];
+
+    const SIZE_BUCKETS: &[f64] = &[
+        10.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 10_000.0,
+    ];
+
+    let builder = PrometheusBuilder::new()
+        .set_buckets_for_metric(
+            Matcher::Full("log_messages_timeshift_seconds".to_string()),
+            EXPONENTIAL_SECONDS,
+        )?
+        .set_buckets_for_metric(
+            Matcher::Full("log_messages_size".to_string()),
+            SIZE_BUCKETS,
+        )?;
+    builder.install_recorder().with_context(|| "can't install metrics recorder")
+}
+
+fn describe_metrics() {
+    use metrics::Unit;
+    metrics::describe_counter!("log_messages_total", Unit::Count, "Total amount of received syslog messages");
+    metrics::describe_histogram!("log_messages_timeshift_seconds", Unit::Seconds,
+        "Offset between sending the syslog message and it being received by the syslog_publisher");
+    metrics::describe_histogram!("log_messages_size", Unit::Bytes, "Size of the received syslog message");
+}
+
 fn main() -> Result<()> {
     dotenv().ok();
     env_logger::init();
+
+    // The first invocation of the metrics macro registers registers them with the metrics recorder.
+    // If however none of the metrics have been triggered yet, the metrics page will be empty.
+    let metrics_recorder = setup_metrics_recorder()?;
 
     let matches = Command::new("syslog_publisher")
         .version("0.1")
@@ -128,7 +188,7 @@ fn main() -> Result<()> {
     rt.block_on(async {
         let addr= format!("0.0.0.0:{}", matches.get_one::<u16>("port").expect("port is required"));
         let socket = UdpSocket::bind(&addr).await?;
-        println!("Listening on: {}", socket.local_addr()?);
+        println!("Listening for syslog on: {}", socket.local_addr()?);
 
         let client = redis::Client::open(redis_conn_info).unwrap();
         let conn = client.get_multiplexed_async_connection().await?;
@@ -136,10 +196,17 @@ fn main() -> Result<()> {
         let (tx, rx) = mpsc::channel::<(chrono::DateTime<chrono::Utc>, Vec<u8>, SocketAddr)>(1_000);
         tokio::spawn(syslog_worker(rx, conn, stream_key, *maxlen));
 
+        describe_metrics();
+        tokio::spawn(start_metrics_server(metrics_recorder));
+
         let mut buf = [0; 1024];
+        let counter_total_messages = metrics::counter!("log_messages_total");
+        let histogram_messages_size = metrics::histogram!("log_messages_size");
         loop {
             let (len, addr) = socket.recv_from(&mut buf).await?;
-            let recv_ts = chrono::Utc::now();
+            let recv_ts = Utc::now();
+            counter_total_messages.increment(1);
+            histogram_messages_size.record(len as f64);
             tx.send((recv_ts, buf[..len].to_vec(), addr)).await?;
         }
     })
