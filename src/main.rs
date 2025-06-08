@@ -279,7 +279,7 @@ fn main() -> Result<()> {
         describe_metrics();
         tokio::spawn(start_metrics_server(metrics_recorder));
 
-        let mut buf = [0; 1024];
+        let mut buf = [0; 65536];
         let counter_total_messages = metrics::counter!("log_messages_total");
         let histogram_messages_size = metrics::histogram!("log_messages_size");
         loop {
