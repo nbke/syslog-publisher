@@ -15,7 +15,7 @@ use clap::{Command, arg, value_parser};
 use dotenv::dotenv;
 use log::{error, warn};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
-use redis::{AsyncCommands, streams::StreamMaxlen};
+use redis::streams::StreamMaxlen;
 use serde_json::json;
 use tokio::net::UdpSocket;
 use tokio::runtime::Runtime;
@@ -28,7 +28,7 @@ fn resolve_year((_month, _date, _hour, _min, _sec): syslog_loose::IncompleteDate
 
 async fn syslog_worker(
     mut rx: mpsc::Receiver<(chrono::DateTime<Utc>, Vec<u8>, SocketAddr)>,
-    mut redis_client: redis::aio::MultiplexedConnection,
+    mut redis_client: impl redis::AsyncCommands,
     stream_key: String,
     maxlen: usize,
 ) {
@@ -262,9 +262,16 @@ fn main() -> Result<()> {
             db: 0,
             username: redis_username,
             password: redis_password,
-            protocol: redis::ProtocolVersion::RESP2,
+            // connection manager can listen for updates and reconnect after a disconnect in RESP3 mode
+            protocol: redis::ProtocolVersion::RESP3,
         },
     };
+    let redis_config = redis::aio::ConnectionManagerConfig::new()
+        .set_factor(2)
+        .set_max_delay(1_000)
+        .set_number_of_retries(25)
+        .set_response_timeout(std::time::Duration::new(5, 0));
+
     let maxlen = matches.get_one::<usize>("maxlen").unwrap();
     let stream_key = matches.get_one::<String>("key").unwrap().clone();
     let metrics_addr = matches.get_one::<String>("metrics").unwrap().clone();
@@ -278,14 +285,14 @@ fn main() -> Result<()> {
         let socket = UdpSocket::bind(&addr).await?;
         println!("Listening for syslog on: {}", socket.local_addr()?);
 
-        let client = redis::Client::open(redis_conn_info).unwrap();
-        let conn = client.get_multiplexed_async_connection().await?;
-
-        let (tx, rx) = mpsc::channel::<(chrono::DateTime<chrono::Utc>, Vec<u8>, SocketAddr)>(1_000);
-        tokio::spawn(syslog_worker(rx, conn, stream_key, *maxlen));
-
         describe_metrics();
         tokio::spawn(start_metrics_server(metrics_addr, metrics_recorder));
+
+        let redis_client = redis::Client::open(redis_conn_info)?;
+        let redis_manager = redis::aio::ConnectionManager::new_with_config(redis_client, redis_config).await?;
+
+        let (tx, rx) = mpsc::channel::<(chrono::DateTime<chrono::Utc>, Vec<u8>, SocketAddr)>(1_000);
+        tokio::spawn(syslog_worker(rx, redis_manager, stream_key, *maxlen));
 
         let mut buf = [0; 65536];
         let counter_total_messages = metrics::counter!("log_messages_total");
