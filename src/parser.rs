@@ -58,5 +58,10 @@ mod tests {
         let (output, encoding) = decode_log_msg(&input_vec);
         assert_eq!(encoding, "ISO-8859-15");
         assert_eq!(output, "<129>1 2015-09-07T04:11:10.821 PLC_SECCPU16 - - - - Wertänderung \"SysLogDaten\".Poa_diffuse Altwert: 40,0 aktueller Wert: 44,0 CPU:SECCPU16");
+
+        let msg = syslog_loose::parse_message(&output, syslog_loose::Variant::RFC5424);
+        assert_eq!(msg.msg, r#"Wertänderung "SysLogDaten".Poa_diffuse Altwert: 40,0 aktueller Wert: 44,0 CPU:SECCPU16"#);
+        assert_eq!(msg.hostname.unwrap(), "PLC_SECCPU16");
+        assert_eq!(msg.timestamp.unwrap().to_string(), "2015-09-07 04:11:10.821 +00:00");
     }
 }
