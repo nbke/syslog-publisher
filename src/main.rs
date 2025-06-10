@@ -1,3 +1,5 @@
+mod parser;
+
 use std::collections::{HashMap, hash_map::Entry};
 use std::env;
 use std::future::ready;
