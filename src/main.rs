@@ -11,8 +11,9 @@ use axum::{
     routing::get,
 };
 use chrono::{Datelike, Utc};
-use clap::{Command, arg, value_parser};
+use clap::{ArgAction, Command, arg, value_parser};
 use dotenv::dotenv;
+use encoding_rs::{ISO_8859_15, UTF_8};
 use log::{error, warn};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use redis::streams::StreamMaxlen;
@@ -20,7 +21,6 @@ use serde_json::json;
 use tokio::net::UdpSocket;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
-use encoding_rs::{UTF_8, ISO_8859_15};
 
 fn resolve_year((_month, _date, _hour, _min, _sec): syslog_loose::IncompleteDate) -> i32 {
     let now = chrono::Utc::now();
@@ -32,6 +32,7 @@ async fn syslog_worker(
     mut redis_client: impl redis::AsyncCommands,
     stream_key: String,
     maxlen: usize,
+    include_raw: bool,
 ) {
     let histogram_timeshift = metrics::histogram!("log_messages_timeshift_millis");
     let counter_redis_errors = metrics::counter!("log_messages_redis_errors");
@@ -44,12 +45,12 @@ async fn syslog_worker(
             (val, encoding, false) if encoding == UTF_8 => {
                 counter_encoding_utf8.increment(1);
                 val
-            },
+            }
             (val, encoding, false) => {
                 warn!("unknown encoding: {}", encoding.name());
                 counter_encoding_unknown.increment(1);
                 val
-            },
+            }
             (_, _, true) => {
                 let (val, encoding, was_replaced) = ISO_8859_15.decode(&input);
                 if encoding == ISO_8859_15 {
@@ -62,7 +63,7 @@ async fn syslog_worker(
                     counter_encoding_replacement.increment(1);
                 }
                 val
-            },
+            }
         };
 
         let parsed_msg = syslog_loose::parse_message_with_year(
@@ -142,6 +143,13 @@ async fn syslog_worker(
             items.push(("data".to_string(), json!(json_elements).to_string()));
         }
         items.push(("msg".to_string(), parsed_msg.msg.to_string()));
+        if include_raw {
+            // The string might not be valid UTF-8, but we do not use any functions from the std library
+            // to process the string. FIXME convert to Vec<str, Vec<u8>>
+            items.push(("raw".to_string(), unsafe {
+                String::from_utf8_unchecked(input)
+            }));
+        }
 
         let result = redis_client
             .xadd_maxlen(&stream_key, StreamMaxlen::Approx(maxlen), "*", &items)
@@ -171,9 +179,7 @@ async fn start_metrics_server(metrics_addr: String, metrics_recorder: Prometheus
         .route("/metrics", get(move || ready(metrics_recorder.render())))
         .fallback(handler_404);
 
-    let listener = tokio::net::TcpListener::bind(metrics_addr)
-        .await
-        .unwrap();
+    let listener = tokio::net::TcpListener::bind(metrics_addr).await.unwrap();
     println!("Serving metrics on: {}", listener.local_addr().unwrap());
     axum::serve(listener, app).await.unwrap();
 }
@@ -240,6 +246,11 @@ fn main() -> Result<()> {
                 .help("Port to listen for incoming syslog messages"),
         )
         .arg(
+            arg!(--"include-raw")
+                .action(ArgAction::SetTrue)
+                .help("Send the raw syslog message without decoding and parsing"),
+        )
+        .arg(
             arg!(-k --key <VALUE>)
                 .required(true)
                 .help("Name of Redis stream"),
@@ -304,6 +315,7 @@ fn main() -> Result<()> {
     let maxlen = matches.get_one::<usize>("maxlen").unwrap();
     let stream_key = matches.get_one::<String>("key").unwrap().clone();
     let metrics_addr = matches.get_one::<String>("metrics").unwrap().clone();
+    let include_raw = matches.get_one::<bool>("include-raw").unwrap();
 
     let rt = Runtime::new()?;
     rt.block_on(async {
@@ -318,10 +330,17 @@ fn main() -> Result<()> {
         tokio::spawn(start_metrics_server(metrics_addr, metrics_recorder));
 
         let redis_client = redis::Client::open(redis_conn_info)?;
-        let redis_manager = redis::aio::ConnectionManager::new_with_config(redis_client, redis_config).await?;
+        let redis_manager =
+            redis::aio::ConnectionManager::new_with_config(redis_client, redis_config).await?;
 
         let (tx, rx) = mpsc::channel::<(chrono::DateTime<chrono::Utc>, Vec<u8>, SocketAddr)>(1_000);
-        tokio::spawn(syslog_worker(rx, redis_manager, stream_key, *maxlen));
+        tokio::spawn(syslog_worker(
+            rx,
+            redis_manager,
+            stream_key,
+            *maxlen,
+            *include_raw,
+        ));
 
         let mut buf = [0; 65536];
         let counter_total_messages = metrics::counter!("log_messages_total");
