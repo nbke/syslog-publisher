@@ -20,6 +20,7 @@ use serde_json::json;
 use tokio::net::UdpSocket;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
+use encoding_rs::ISO_8859_15;
 
 fn resolve_year((_month, _date, _hour, _min, _sec): syslog_loose::IncompleteDate) -> i32 {
     let now = chrono::Utc::now();
@@ -34,8 +35,31 @@ async fn syslog_worker(
 ) {
     let histogram_timeshift = metrics::histogram!("log_messages_timeshift_millis");
     let counter_redis_errors = metrics::counter!("log_messages_redis_errors");
+    let counter_encoding_utf8 = metrics::counter!("log_messages_encoding_utf8_count");
+    let counter_encoding_iso8859_15 = metrics::counter!("log_messages_encoding_iso8859-15_count");
+    let counter_encoding_unknown = metrics::counter!("log_messages_encoding_unknown_count");
+    let counter_encoding_replacement = metrics::counter!("log_messages_encoding_replacement_count");
     while let Some((recv_ts, input, addr)) = rx.recv().await {
-        let utf8_input = String::from_utf8_lossy(&input);
+        let utf8_input = match String::from_utf8(input.clone()) {
+            Ok(val) => {
+                counter_encoding_utf8.increment(1);
+                val
+            },
+            Err(_) => {
+                let (val, encoding, was_replaced) = ISO_8859_15.decode(&input);
+                if encoding == ISO_8859_15 {
+                    counter_encoding_iso8859_15.increment(1);
+                } else {
+                    counter_encoding_unknown.increment(1);
+                    warn!("unknown encoding: {}", encoding.name());
+                }
+                if was_replaced {
+                    counter_encoding_replacement.increment(1);
+                }
+                val.to_string()
+            },
+        };
+
         let parsed_msg = syslog_loose::parse_message_with_year(
             &utf8_input,
             resolve_year,
