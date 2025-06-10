@@ -12,9 +12,18 @@ use nom::{
 };
 
 
+fn parse_loose_timestamp(input: &str) -> Result<DateTime<FixedOffset>, chrono::ParseError> {
+    if input.ends_with("Z") {
+        chrono::DateTime::parse_from_rfc3339(input)
+    } else {
+        let naive = chrono::NaiveDateTime::parse_from_str(input, "%Y-%m-%dT%H:%M:%S%.f")?;
+        Ok(naive.and_utc().fixed_offset())
+    }
+}
+
 /// The timestamp for 5424 messages yyyy-mm-ddThh:mm:ss.mmmmZ
 pub(crate) fn timestamp_3339(input: &str) -> IResult<&str, DateTime<FixedOffset>> {
-    map_res(take_until(" "), chrono::DateTime::parse_from_rfc3339)(input)
+    map_res(take_until(" "), parse_loose_timestamp)(input)
 }
 
 
