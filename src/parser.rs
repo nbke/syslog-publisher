@@ -46,6 +46,7 @@ mod tests {
         let (val, encoding, was_replaced) = ISO_8859_15.decode(input);
 
         assert_eq!(val, "Wertänderung");
+        assert_eq!(val, str::from_utf8(b"Wert\xc3\xa4nderung").unwrap()); // verify output from redis-cli
         assert_eq!(encoding.name(), "ISO-8859-15");
         assert!(!was_replaced);
     }
