@@ -38,36 +38,9 @@ async fn syslog_worker(
 ) {
     let histogram_timeshift = metrics::histogram!("log_messages_timeshift_millis");
     let counter_redis_errors = metrics::counter!("log_messages_redis_errors");
-    let counter_encoding_utf8 = metrics::counter!("log_messages_encoding_utf8_count");
-    let counter_encoding_iso8859_15 = metrics::counter!("log_messages_encoding_iso8859-15_count");
-    let counter_encoding_unknown = metrics::counter!("log_messages_encoding_unknown_count");
-    let counter_encoding_replacement = metrics::counter!("log_messages_encoding_replacement_count");
-    while let Some((recv_ts, input, addr)) = rx.recv().await {
-        let utf8_input = match UTF_8.decode(&input) {
-            (val, encoding, false) if encoding == UTF_8 => {
-                counter_encoding_utf8.increment(1);
-                val
-            }
-            (val, encoding, false) => {
-                warn!("unknown encoding: {}", encoding.name());
-                counter_encoding_unknown.increment(1);
-                val
-            }
-            (_, _, true) => {
-                let (val, encoding, was_replaced) = ISO_8859_15.decode(&input);
-                if encoding == ISO_8859_15 {
-                    counter_encoding_iso8859_15.increment(1);
-                } else {
-                    counter_encoding_unknown.increment(1);
-                    warn!("unknown encoding: {}", encoding.name());
-                }
-                if was_replaced {
-                    counter_encoding_replacement.increment(1);
-                }
-                val
-            }
-        };
 
+    while let Some((recv_ts, input, addr)) = rx.recv().await {
+        let (utf8_input, encoding) = parser::decode_log_msg(&input);
         let parsed_msg = syslog_loose::parse_message_with_year(
             &utf8_input,
             resolve_year,
@@ -85,6 +58,7 @@ async fn syslog_worker(
             ),
             ("addr".to_string(), addr.to_string().into()),
             ("protocol".to_string(), protocol),
+            ("encoding".to_string(), encoding.to_string()),
         ];
         if let Some(facility) = parsed_msg.facility {
             items.push(("facility".to_string(), facility.as_str().to_string()));
