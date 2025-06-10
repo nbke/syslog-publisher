@@ -15,7 +15,6 @@ use axum::{
 use chrono::{Datelike, Utc};
 use clap::{ArgAction, Command, arg, value_parser};
 use dotenv::dotenv;
-use encoding_rs::{ISO_8859_15, UTF_8};
 use log::{error, warn};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use redis::streams::StreamMaxlen;

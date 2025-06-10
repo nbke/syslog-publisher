@@ -19,7 +19,7 @@ pub fn decode_log_msg(input: &Vec<u8>) -> (Cow<str>, &str) {
             counter_encoding_unknown.increment(1);
             (val, encoding.name())
         }
-        (_, encoding, true) => {
+        (_, _, true) => {
             let (val, encoding, was_replaced) = ISO_8859_15.decode(&input);
             if encoding == ISO_8859_15 {
                 counter_encoding_iso8859_15.increment(1);
