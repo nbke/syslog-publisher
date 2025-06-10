@@ -1,5 +1,4 @@
 mod parser;
-mod lexer;
 
 use std::collections::{HashMap, hash_map::Entry};
 use std::env;
